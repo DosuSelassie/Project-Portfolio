@@ -1,0 +1,176 @@
+---
+title: "Diarrhea Among Infants"
+output: html_notebook
+---
+# Problem Statement
+Analyze data to identify the most contributing factors of diarrhea among infants in Ghana and use the insights to predict the risk of infection among infants in five years.
+
+# Data Source
+The Demographic Health Survey data
+
+```{r Setting up the environment}
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(ggplot2)
+library(caret)
+library(rsample)
+library(visdat)
+library(recipes)
+library(e1071)
+library(glmnet)
+library(MLmetrics)
+library(caretEnsemble)
+library(kernlab)
+```
+
+```{r Importing and subsetting dataset}
+gh_dhs_data<-read_csv("C:/Users/User/OneDrive/Desktop/Modelling_diarrhea/DHS DATA_2014/dhs_data.csv") %>% 
+  filter(HV000=="Ghana (2014)")
+```
+
+# Data Preprocessing
+It is required that the data be duly processed for training in order to achieve meaningful results. This involves data cleaning and wrangling,dealing with missing values and dimension reduction. HV000,hhid,perweight,ageHHgroup,educlvl,religion and kidsex are to be dropped because they are irrelevant for the analysis as well as HHSize,momAge beacause of there are duplicates and hwbmizwhocat because it has too many missing values.
+
+```{r dropping features, eliminating missing values and converting data type to factor}
+cleaned_data<-gh_dhs_data %>% select(-HV000,-hhid,-perweight,-ageHHgroup,-educlvl,-religion,-HHSize,-momAge,-hwbmizwhocat,-kidsex) %>% drop_na() %>% mutate(across(where(is.character),as.factor))
+
+```
+
+# Exploratory Data Analysis
+```{r}
+cleaned_data %>% 
+  select(kidcurage,diarrhea) %>% group_by(kidcurage) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(HV025,diarrhea) %>% group_by(HV025) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(brsfedcat,diarrhea) %>% group_by(brsfedcat) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(momAgeGroup,diarrhea) %>% group_by(momAgeGroup) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(marstat,diarrhea) %>% group_by(marstat) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(hhWealth,diarrhea) %>% group_by(hhWealth) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+cleaned_data %>% 
+  select(HHSizeCat,diarrhea) %>% group_by(HHSizeCat) %>% 
+  summarise(Yes=sum(diarrhea == "Yes"),No=sum(diarrhea=="No"))
+```
+## More dimension reduction
+Identify and remove low variation features from the cleaned data set with nearZeroVar 
+```{r}
+nearZeroVar(cleaned_data)
+cleaned_data<-cleaned_data %>% select(-kidtwin)
+```
+
+# Modeling Diarrhea
+```{r data splitting}
+set.seed(123) 
+split <- initial_split(cleaned_data, prop = 0.7, 
+                       strata = "diarrhea")
+train_part <- training(split) 
+test_part <- testing(split)
+table(train_part$diarrhea) %>% prop.table()
+table(test_part$diarrhea) %>% prop.table()
+
+```
+
+```{r one hot encoding}
+dummydata <- dummyVars(diarrhea ~ ., data = train_part)
+trainingSet_D <- as.data.frame(predict(dummydata, newdata = train_part))
+```
+
+```{r normalize predictors}
+rangeModel <- preProcess(trainingSet_D, method = "range")
+trainingSet_R <- predict(rangeModel, newdata = trainingSet_D)
+```
+
+```{r Adding response variable back to training set}
+trainingSet <- cbind(train_part$diarrhea, trainingSet_R)
+names(trainingSet)[1] <- "diarrhea"
+```
+
+```{r apply the transformation to the test data }
+testSet_dummy <- predict(dummydata, test_part)
+testSet_range <- predict(rangeModel, testSet_dummy)
+testSet_range <- data.frame(testSet_range)
+testSet <- cbind(test_part$diarrhea, testSet_range)
+names(testSet) <- names(trainingSet)
+```
+
+```{r train model}
+set.seed(123)
+rf <- train(diarrhea ~., data = trainingSet, method = "rf")
+rf
+```
+
+```{r variable importance}
+varimp_rf <- varImp(rf)
+varimp_rf
+```
+
+The most contributing factors of diarrhea among infants in Ghana are current age,breastfeeding status and household wealth.
+
+
+```{r testing the model and measuring performance}
+fitted <- predict(rf, testSet)
+confusionMatrix(reference = testSet$diarrhea, data = fitted, 
+                mode = "everything", positive = "Yes")
+```
+Despite the high accuracy of about 87% the model has to be tuned and improved for better performance.
+
+u
+## Improving model performance due to class imbalance
+```{r hyperparameter tuning}
+twoClassCtrl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 10,
+  savePredictions = "final",
+  classProbs = T,
+  summaryFunction = twoClassSummary
+)
+```
+
+```{r fittng and testing model afater hyperparameter tuning}
+set.seed(123)
+rfTL <- train(diarrhea ~., data = trainingSet, method = "rf", metric = "ROC",
+                         trControl = twoClassCtrl, tuneLength = 10)
+
+fittedTL <- predict(rfTL, testSet)
+confusionMatrix(reference = testSet$diarrhea, 
+                data = fittedTL, mode = "everything", positive = "Yes")
+```
+## Addressing high class imbalance problem
+```{r using class probabilities}
+set.seed(123)
+fittedProb <- predict(rfTL, testSet, type = "prob")
+fittedProb <- fittedProb$Yes
+fittedProb <- factor(ifelse(fittedProb >= 0.333, "Yes", "No"))
+
+
+confusionMatrix(reference = testSet$diarrhea, data = fittedProb,
+                mode = "everything", positive = "Yes")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
